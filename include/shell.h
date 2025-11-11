@@ -2,21 +2,21 @@
 #define SHELL_H
 
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <errno.h>
+#include <sys/wait.h>   // for waitpid()
 
-#define MAX_LEN 512
-#define MAXARGS 10
-#define ARGLEN 30
+#define MAX_LEN 1024
+#define MAXARGS 64
+#define ARGLEN 128
 #define PROMPT "FCIT> "
 
-// Function prototypes
+/* Function prototypes */
 char* read_cmd(char* prompt, FILE* fp);
 char** tokenize(char* cmdline);
-int execute(char** arglist);
+void shell_loop(void);
+int execute(char **args);         // return type fixed
+int handle_builtin(char **args);  // for built-in commands
 
-#endif // SHELL_H
+#endif /* SHELL_H */
