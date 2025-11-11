@@ -1,299 +1,129 @@
 #include "shell.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
-/*
- * read_cmd: reads either a single-line command or a multi-line if...then...fi block.
- * Returns a malloc'd string (caller must free). Returns NULL on EOF (Ctrl+D).
- */
-char *read_cmd(FILE *fp) {
-    char *buf = malloc(MAX_LEN);
-    if (!buf) return NULL;
-    buf[0] = '\0';
+#define MAX_ARGS 100
+#define MAX_LINE 1024
+#define PROMPT "FCIT> "
 
-    /* Read first line */
-    if (!fgets(buf, MAX_LEN, fp)) {
-        free(buf);
-        return NULL; /* EOF */
-    }
-    /* remove trailing newline */
-    buf[strcspn(buf, "\n")] = 0;
+// ---------------- Variable System ----------------
+static Var *var_head = NULL;
 
-    /* If it's an "if" line, continue reading until matching "fi" */
-    char *trim = buf;
-    while (*trim == ' ' || *trim == '\t') trim++;
-
-    if (strncmp(trim, "if ", 3) == 0 || strcmp(trim, "if") == 0) {
-        /* we're in an if...then...fi block */
-        size_t used = strlen(buf);
-        /* append newline to mark line boundary when parsing later */
-        if (used + 2 < MAX_LEN) {
-            buf[used++] = '\n';
-            buf[used] = '\0';
+void set_variable(const char *name, const char *value) {
+    Var *curr = var_head;
+    while (curr) {
+        if (strcmp(curr->name, name) == 0) {
+            strncpy(curr->value, value, sizeof(curr->value) - 1);
+            curr->value[sizeof(curr->value) - 1] = '\0';
+            return;
         }
-
-        char line[MAX_LEN];
-        int found_fi = 0;
-        while (fgets(line, sizeof(line), fp)) {
-            /* strip newline */
-            line[strcspn(line, "\n")] = 0;
-            size_t linelen = strlen(line);
-            if (used + linelen + 2 >= MAX_LEN) {
-                /* need more space: reallocate */
-                size_t newsize = MAX_LEN * 2;
-                char *nbuf = realloc(buf, newsize);
-                if (!nbuf) break;
-                buf = nbuf;
-                /* update MAX_LEN locally? we rely on allocated size only */
-            }
-            /* append line + newline */
-            strcat(buf, line);
-            strcat(buf, "\n");
-            used = strlen(buf);
-
-            /* check for fi on its own (with optional spaces/tabs) */
-            char tmptrim[MAX_LEN];
-            strncpy(tmptrim, line, sizeof(tmptrim)-1);
-            tmptrim[sizeof(tmptrim)-1] = '\0';
-            char *t = tmptrim;
-            while (*t == ' ' || *t == '\t') t++;
-            if (strcmp(t, "fi") == 0) {
-                found_fi = 1;
-                break;
-            }
-        }
-        /* return entire block (includes final 'fi\n') */
-        return buf;
+        curr = curr->next;
     }
-
-    /* normal single-line command */
-    return buf;
+    Var *newvar = malloc(sizeof(Var));
+    if (!newvar) {
+        fprintf(stderr, "Memory allocation failed\n");
+        return;
+    }
+    strncpy(newvar->name, name, sizeof(newvar->name) - 1);
+    newvar->name[sizeof(newvar->name) - 1] = '\0';
+    strncpy(newvar->value, value, sizeof(newvar->value) - 1);
+    newvar->value[sizeof(newvar->value) - 1] = '\0';
+    newvar->next = var_head;
+    var_head = newvar;
 }
 
-/* tokenize: simple whitespace tokenization, returns NULL-terminated list.
-   caller must free via free_token_list(). */
-char **tokenize(const char *cmdline) {
-    if (cmdline == NULL) return NULL;
-
-    char *copy = strdup(cmdline);
-    if (!copy) return NULL;
-
-    char **args = malloc(sizeof(char*) * (MAXARGS + 1));
-    if (!args) { free(copy); return NULL; }
-
-    int i = 0;
-    char *tok = strtok(copy, " \t");
-    while (tok != NULL && i < MAXARGS) {
-        args[i++] = strdup(tok);
-        tok = strtok(NULL, " \t");
+const char *get_variable(const char *name) {
+    Var *curr = var_head;
+    while (curr) {
+        if (strcmp(curr->name, name) == 0)
+            return curr->value;
+        curr = curr->next;
     }
-    args[i] = NULL;
-    free(copy);
-    return args;
+    return "";
 }
 
-void free_token_list(char **list) {
-    if (!list) return;
-    for (int i = 0; list[i] != NULL; ++i) {
-        free(list[i]);
+void print_variables(void) {
+    Var *curr = var_head;
+    while (curr) {
+        printf("%s=%s\n", curr->name, curr->value);
+        curr = curr->next;
     }
-    free(list);
 }
 
-/* parse_and_execute_if_block:
-   block is the full multiline string containing:
-     if <cmd>
-     then
-       <commands...>
-     [else
-       <commands...>]
-     fi
-   Returns 0 on success (parsed & executed), -1 on parse error.
-*/
-int parse_and_execute_if_block(const char *block) {
-    if (!block) return -1;
+// ---------------- Variable Helpers ----------------
+int handle_assignment(char *cmd) {
+    char *eq = strchr(cmd, '=');
+    if (!eq) return 0; // Not an assignment
 
-    /* Duplicate and split by lines */
-    char *copy = strdup(block);
-    if (!copy) return -1;
+    *eq = '\0';
+    char *name = cmd;
+    char *value = eq + 1;
 
-    char *lines[256];
-    int nlines = 0;
-    char *line = strtok(copy, "\n");
-    while (line && nlines < 256) {
-        /* trim leading/trailing spaces */
-        while (*line == ' ' || *line == '\t') line++;
-        size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\t')) {
-            line[len-1] = '\0';
-            len--;
-        }
-        lines[nlines++] = line;
-        line = strtok(NULL, "\n");
-    }
+    // Ensure no spaces
+    if (strchr(name, ' ') || strchr(value, ' '))
+        return 0;
 
-    if (nlines == 0) {
-        free(copy);
-        return -1;
-    }
-
-    /* Expect first line to start with 'if' */
-    if (strncmp(lines[0], "if", 2) != 0) {
-        free(copy);
-        return -1;
-    }
-
-    /* parse the if command (after 'if') */
-    const char *ifcmd = lines[0];
-    while (*ifcmd == ' ' || *ifcmd == '\t') ifcmd++;
-    if (strncmp(ifcmd, "if", 2) == 0) {
-        ifcmd += 2;
-        while (*ifcmd == ' ' || *ifcmd == '\t') ifcmd++;
-    }
-
-    /* find indices of then, else (if present), fi */
-    int then_idx = -1, else_idx = -1, fi_idx = -1;
-    for (int i = 1; i < nlines; ++i) {
-        if (strcmp(lines[i], "then") == 0 && then_idx == -1) then_idx = i;
-        else if (strcmp(lines[i], "else") == 0 && else_idx == -1) else_idx = i;
-        else if (strcmp(lines[i], "fi") == 0) { fi_idx = i; break; }
-    }
-
-    if (then_idx == -1 || fi_idx == -1 || !(then_idx < fi_idx)) {
-        free(copy);
-        return -1;
-    }
-
-    /* gather 'then' commands (between then_idx+1 and else_idx-1 or fi_idx-1) */
-    int then_start = then_idx + 1;
-    int then_end = (else_idx == -1) ? fi_idx - 1 : else_idx - 1;
-
-    /* gather 'else' commands if present */
-    int else_start = -1, else_end = -1;
-    if (else_idx != -1) {
-        else_start = else_idx + 1;
-        else_end = fi_idx - 1;
-    }
-
-    /* Execute the command in ifcmd: tokenize and fork/wait to gather exit status */
-    char **ifargs = tokenize(ifcmd);
-    if (!ifargs) { free(copy); return -1; }
-
-    pid_t cpid = fork();
-    if (cpid < 0) {
-        perror("fork");
-        free_token_list(ifargs);
-        free(copy);
-        return -1;
-    } else if (cpid == 0) {
-        /* child: use execute() function where possible or execvp fallback */
-        if (handle_builtin(ifargs)) {
-            /* builtin executed in child (rare) */
-            exit(0);
-        } else {
-            /* attempt execvp directly */
-            execvp(ifargs[0], ifargs);
-            /* if execvp fails, print and exit with non-zero */
-            fprintf(stderr, "execvp: %s: No such file or directory\n", ifargs[0]);
-            exit(127);
-        }
-    } else {
-        int status = 0;
-        waitpid(cpid, &status, 0);
-        int exitcode = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-
-        /* choose which block to run */
-        int run_then = (exitcode == 0);
-
-        if (run_then) {
-            for (int i = then_start; i <= then_end; ++i) {
-                if (lines[i] == NULL) continue;
-                if (strlen(lines[i]) == 0) continue;
-                /* For each line, handle builtins or execute */
-                char **args = tokenize(lines[i]);
-                if (!args) continue;
-                if (!handle_builtin(args)) {
-                    /* check for pipes/redirection */
-                    if (strchr(lines[i], '|') || strchr(lines[i], '>') || strchr(lines[i], '<')) {
-                        execute_with_redirection_and_pipes(lines[i]);
-                    } else {
-                        execute(args);
-                    }
-                }
-                free_token_list(args);
-            }
-        } else {
-            if (else_idx != -1) {
-                for (int i = else_start; i <= else_end; ++i) {
-                    if (lines[i] == NULL) continue;
-                    if (strlen(lines[i]) == 0) continue;
-                    char **args = tokenize(lines[i]);
-                    if (!args) continue;
-                    if (!handle_builtin(args)) {
-                        if (strchr(lines[i], '|') || strchr(lines[i], '>') || strchr(lines[i], '<')) {
-                            execute_with_redirection_and_pipes(lines[i]);
-                        } else {
-                            execute(args);
-                        }
-                    }
-                    free_token_list(args);
-                }
-            }
-        }
-    }
-
-    free_token_list(ifargs);
-    free(copy);
-    return 0;
+    set_variable(name, value);
+    return 1;
 }
 
-/* shell_loop: main loop: read commands, detect if-blocks, handle builtins and normal commands */
+void expand_variables(char **args) {
+    for (int i = 0; args[i]; i++) {
+        if (args[i][0] == '$') {
+            const char *val = get_variable(args[i] + 1);
+            char *expanded = malloc(strlen(val) + 1);
+            if (!expanded) continue;
+            strcpy(expanded, val);
+            free(args[i]);
+            args[i] = expanded;
+        }
+    }
+}
+
+// ---------------- Main Shell Loop ----------------
 void shell_loop(void) {
+    char line[MAX_LINE];
+
     while (1) {
         printf("%s", PROMPT);
         fflush(stdout);
 
-        char *cmdline = read_cmd(stdin);
-        if (!cmdline) {
-            /* EOF */
-            printf("\n");
-            break;
+        if (!fgets(line, sizeof(line), stdin)) break;
+        line[strcspn(line, "\n")] = '\0'; // remove newline
+
+        if (strlen(line) == 0) continue;
+        if (strcmp(line, "exit") == 0) break;
+
+        // Handle variable assignment
+        if (handle_assignment(line)) continue;
+
+        // Tokenize input
+        char *args[MAX_ARGS];
+        char *tok = strtok(line, " ");
+        int i = 0;
+        while (tok && i < MAX_ARGS - 1) {
+            args[i++] = strdup(tok);
+            tok = strtok(NULL, " ");
         }
+        args[i] = NULL;
 
-        /* trim leading spaces */
-        char *p = cmdline;
-        while (*p == ' ' || *p == '\t') p++;
+        // Expand variables ($VAR)
+        expand_variables(args);
 
-        if (strncmp(p, "if", 2) == 0) {
-            /* handle multi-line if block */
-            parse_and_execute_if_block(cmdline);
-            free(cmdline);
+        // Built-in command: set (list variables)
+        if (args[0] && strcmp(args[0], "set") == 0) {
+            print_variables();
+            for (int j = 0; j < i; j++) free(args[j]);
             continue;
         }
 
-        /* single-line command processing */
-        /* simple check for empty */
-        if (strlen(p) == 0) {
-            free(cmdline);
-            continue;
-        }
+        // Execute normal command
+        execute(args);
 
-        /* Tokenize */
-        char **args = tokenize(p);
-        if (!args) {
-            free(cmdline);
-            continue;
-        }
-
-        if (!handle_builtin(args)) {
-            /* check for advanced syntax first (pipes/redirection) */
-            if (strchr(p, '|') || strchr(p, '>') || strchr(p, '<')) {
-                execute_with_redirection_and_pipes(p);
-            } else {
-                execute(args);
-            }
-        }
-
-        free_token_list(args);
-        free(cmdline);
+        // Cleanup
+        for (int j = 0; j < i; j++) free(args[j]);
     }
 }
-

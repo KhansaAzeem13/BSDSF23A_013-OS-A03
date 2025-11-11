@@ -21,13 +21,12 @@ void add_job(pid_t pid, const char *cmd) {
     }
 }
 
-int print_jobs(void) {
+void print_jobs(void) {
     for (int i = 0; i < job_count; i++) {
         if (jobs[i].active)
             printf("[%d] PID=%d running  %s\n", i + 1, jobs[i].pid, jobs[i].cmd);
     }
-    return 1;
-}
+    }
 
 int bring_fg(int jobid) {
     if (jobid < 1 || jobid > job_count || !jobs[jobid - 1].active) {
@@ -160,3 +159,51 @@ int execute_with_redirection_and_pipes(char *cmdline) {
     return 1;
 }
 
+int handle_builtin(char **args) {
+    if (args[0] == NULL)
+        return 1;
+
+    if (strcmp(args[0], "exit") == 0) {
+        exit(0);
+    } 
+    else if (strcmp(args[0], "cd") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "cd: missing argument\n");
+        } else {
+            if (chdir(args[1]) != 0) {
+                perror("cd");
+            }
+        }
+        return 1;
+    } 
+    else if (strcmp(args[0], "pwd") == 0) {
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != NULL)
+            printf("%s\n", cwd);
+        else
+            perror("pwd");
+        return 1;
+    } 
+    else if (strcmp(args[0], "jobs") == 0) {
+        print_jobs();
+        return 1;
+    } 
+    else if (strcmp(args[0], "fg") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "fg: missing job id\n");
+        } else {
+            bring_fg(atoi(args[1]));
+        }
+        return 1;
+    } 
+    else if (strcmp(args[0], "kill") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "kill: missing job id\n");
+        } else {
+            kill_job(atoi(args[1]));
+        }
+        return 1;
+    }
+
+    return 0; // Not a built-in command
+}
