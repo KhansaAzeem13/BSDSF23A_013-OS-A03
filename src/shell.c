@@ -1,150 +1,299 @@
-/* --- Paste into src/shell.c (replace existing shell loop) --- */
-
 #include "shell.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <signal.h>
 
-static void reap_children(void) {
-    int status;
-    pid_t pid;
-    // Non-blocking reap of any finished children
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        // If you have a remove_job_by_pid() function, call it so jobs list updates
-        #ifdef HAS_REMOVE_JOB_BY_PID
-        remove_job_by_pid(pid);
-        #endif
-        // Optionally print notification:
-        if (WIFEXITED(status)) {
-            // printf("Reaped PID %d (exit %d)\n", pid, WEXITSTATUS(status));
-        } else if (WIFSIGNALED(status)) {
-            // printf("Reaped PID %d (signal %d)\n", pid, WTERMSIG(status));
-        }
+/*
+ * read_cmd: reads either a single-line command or a multi-line if...then...fi block.
+ * Returns a malloc'd string (caller must free). Returns NULL on EOF (Ctrl+D).
+ */
+char *read_cmd(FILE *fp) {
+    char *buf = malloc(MAX_LEN);
+    if (!buf) return NULL;
+    buf[0] = '\0';
+
+    /* Read first line */
+    if (!fgets(buf, MAX_LEN, fp)) {
+        free(buf);
+        return NULL; /* EOF */
     }
+    /* remove trailing newline */
+    buf[strcspn(buf, "\n")] = 0;
+
+    /* If it's an "if" line, continue reading until matching "fi" */
+    char *trim = buf;
+    while (*trim == ' ' || *trim == '\t') trim++;
+
+    if (strncmp(trim, "if ", 3) == 0 || strcmp(trim, "if") == 0) {
+        /* we're in an if...then...fi block */
+        size_t used = strlen(buf);
+        /* append newline to mark line boundary when parsing later */
+        if (used + 2 < MAX_LEN) {
+            buf[used++] = '\n';
+            buf[used] = '\0';
+        }
+
+        char line[MAX_LEN];
+        int found_fi = 0;
+        while (fgets(line, sizeof(line), fp)) {
+            /* strip newline */
+            line[strcspn(line, "\n")] = 0;
+            size_t linelen = strlen(line);
+            if (used + linelen + 2 >= MAX_LEN) {
+                /* need more space: reallocate */
+                size_t newsize = MAX_LEN * 2;
+                char *nbuf = realloc(buf, newsize);
+                if (!nbuf) break;
+                buf = nbuf;
+                /* update MAX_LEN locally? we rely on allocated size only */
+            }
+            /* append line + newline */
+            strcat(buf, line);
+            strcat(buf, "\n");
+            used = strlen(buf);
+
+            /* check for fi on its own (with optional spaces/tabs) */
+            char tmptrim[MAX_LEN];
+            strncpy(tmptrim, line, sizeof(tmptrim)-1);
+            tmptrim[sizeof(tmptrim)-1] = '\0';
+            char *t = tmptrim;
+            while (*t == ' ' || *t == '\t') t++;
+            if (strcmp(t, "fi") == 0) {
+                found_fi = 1;
+                break;
+            }
+        }
+        /* return entire block (includes final 'fi\n') */
+        return buf;
+    }
+
+    /* normal single-line command */
+    return buf;
 }
 
-static char *trim_whitespace(char *s) {
-    if (!s) return s;
-    // left trim
-    while (isspace((unsigned char)*s)) s++;
-    if (*s == 0) return s;
-    // right trim
-    char *end = s + strlen(s) - 1;
-    while (end > s && isspace((unsigned char)*end)) end--;
-    end[1] = '\0';
-    return s;
-}
+/* tokenize: simple whitespace tokenization, returns NULL-terminated list.
+   caller must free via free_token_list(). */
+char **tokenize(const char *cmdline) {
+    if (cmdline == NULL) return NULL;
 
-static void parse_args(char *cmd, char **args, int *argcount) {
-    // Simple whitespace tokenizer (not handling quotes)
-    *argcount = 0;
-    char *tok = strtok(cmd, " \t");
-    while (tok != NULL && *argcount < MAX_ARGS - 1) {
-        args[(*argcount)++] = tok;
+    char *copy = strdup(cmdline);
+    if (!copy) return NULL;
+
+    char **args = malloc(sizeof(char*) * (MAXARGS + 1));
+    if (!args) { free(copy); return NULL; }
+
+    int i = 0;
+    char *tok = strtok(copy, " \t");
+    while (tok != NULL && i < MAXARGS) {
+        args[i++] = strdup(tok);
         tok = strtok(NULL, " \t");
     }
-    args[*argcount] = NULL;
+    args[i] = NULL;
+    free(copy);
+    return args;
 }
 
-static void launch_command(char *cmdstr, int background) {
-    // cmdstr is modifiable (we'll use strtok etc). Keep a copy for job text.
-    char cmdcopy[MAX_CMDLEN];
-    strncpy(cmdcopy, cmdstr, sizeof(cmdcopy)-1);
-    cmdcopy[sizeof(cmdcopy)-1] = '\0';
+void free_token_list(char **list) {
+    if (!list) return;
+    for (int i = 0; list[i] != NULL; ++i) {
+        free(list[i]);
+    }
+    free(list);
+}
 
-    // If this command contains pipes or redirection and you already have
-    // an implementation in execute_with_redirection_and_pipes(), call it here:
-    // if (strchr(cmdstr, '|') || strchr(cmdstr, '>') || strchr(cmdstr, '<')) {
-    //     execute_with_redirection_and_pipes(cmdstr);
-    //     return;
-    // }
+/* parse_and_execute_if_block:
+   block is the full multiline string containing:
+     if <cmd>
+     then
+       <commands...>
+     [else
+       <commands...>]
+     fi
+   Returns 0 on success (parsed & executed), -1 on parse error.
+*/
+int parse_and_execute_if_block(const char *block) {
+    if (!block) return -1;
 
-    // parse arguments
-    char *args[MAX_ARGS];
-    int argc = 0;
-    parse_args(cmdstr, args, &argc);
-    if (argc == 0) return;  // nothing to run
+    /* Duplicate and split by lines */
+    char *copy = strdup(block);
+    if (!copy) return -1;
 
-    // handle builtins in this helper? (Prefer existing handle_builtin)
-    extern int handle_builtin(char **args); // use existing builtin handler if present
-    if (handle_builtin(args)) return;
+    char *lines[256];
+    int nlines = 0;
+    char *line = strtok(copy, "\n");
+    while (line && nlines < 256) {
+        /* trim leading/trailing spaces */
+        while (*line == ' ' || *line == '\t') line++;
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\t')) {
+            line[len-1] = '\0';
+            len--;
+        }
+        lines[nlines++] = line;
+        line = strtok(NULL, "\n");
+    }
+
+    if (nlines == 0) {
+        free(copy);
+        return -1;
+    }
+
+    /* Expect first line to start with 'if' */
+    if (strncmp(lines[0], "if", 2) != 0) {
+        free(copy);
+        return -1;
+    }
+
+    /* parse the if command (after 'if') */
+    const char *ifcmd = lines[0];
+    while (*ifcmd == ' ' || *ifcmd == '\t') ifcmd++;
+    if (strncmp(ifcmd, "if", 2) == 0) {
+        ifcmd += 2;
+        while (*ifcmd == ' ' || *ifcmd == '\t') ifcmd++;
+    }
+
+    /* find indices of then, else (if present), fi */
+    int then_idx = -1, else_idx = -1, fi_idx = -1;
+    for (int i = 1; i < nlines; ++i) {
+        if (strcmp(lines[i], "then") == 0 && then_idx == -1) then_idx = i;
+        else if (strcmp(lines[i], "else") == 0 && else_idx == -1) else_idx = i;
+        else if (strcmp(lines[i], "fi") == 0) { fi_idx = i; break; }
+    }
+
+    if (then_idx == -1 || fi_idx == -1 || !(then_idx < fi_idx)) {
+        free(copy);
+        return -1;
+    }
+
+    /* gather 'then' commands (between then_idx+1 and else_idx-1 or fi_idx-1) */
+    int then_start = then_idx + 1;
+    int then_end = (else_idx == -1) ? fi_idx - 1 : else_idx - 1;
+
+    /* gather 'else' commands if present */
+    int else_start = -1, else_end = -1;
+    if (else_idx != -1) {
+        else_start = else_idx + 1;
+        else_end = fi_idx - 1;
+    }
+
+    /* Execute the command in ifcmd: tokenize and fork/wait to gather exit status */
+    char **ifargs = tokenize(ifcmd);
+    if (!ifargs) { free(copy); return -1; }
 
     pid_t cpid = fork();
     if (cpid < 0) {
         perror("fork");
-        return;
-    }
-    if (cpid == 0) {
-        // Child
-        // Reset signals to default (optional)
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTSTP, SIG_DFL);
-        execvp(args[0], args);
-        // If execvp fails:
-        perror("execvp");
-        _exit(127);
-    } else {
-        // Parent
-        if (background) {
-            // Don't wait — record job
-            add_job(cpid, cmdcopy);
-            printf("[Job %d] started (PID=%d): %s\n", /*jobid*/ 0, (int)cpid, cmdcopy);
-            // Note: if add_job returns job id, you can print proper job number.
+        free_token_list(ifargs);
+        free(copy);
+        return -1;
+    } else if (cpid == 0) {
+        /* child: use execute() function where possible or execvp fallback */
+        if (handle_builtin(ifargs)) {
+            /* builtin executed in child (rare) */
+            exit(0);
         } else {
-            // Foreground — wait for it
-            int status;
-            if (waitpid(cpid, &status, 0) < 0) {
-                perror("waitpid");
+            /* attempt execvp directly */
+            execvp(ifargs[0], ifargs);
+            /* if execvp fails, print and exit with non-zero */
+            fprintf(stderr, "execvp: %s: No such file or directory\n", ifargs[0]);
+            exit(127);
+        }
+    } else {
+        int status = 0;
+        waitpid(cpid, &status, 0);
+        int exitcode = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+
+        /* choose which block to run */
+        int run_then = (exitcode == 0);
+
+        if (run_then) {
+            for (int i = then_start; i <= then_end; ++i) {
+                if (lines[i] == NULL) continue;
+                if (strlen(lines[i]) == 0) continue;
+                /* For each line, handle builtins or execute */
+                char **args = tokenize(lines[i]);
+                if (!args) continue;
+                if (!handle_builtin(args)) {
+                    /* check for pipes/redirection */
+                    if (strchr(lines[i], '|') || strchr(lines[i], '>') || strchr(lines[i], '<')) {
+                        execute_with_redirection_and_pipes(lines[i]);
+                    } else {
+                        execute(args);
+                    }
+                }
+                free_token_list(args);
+            }
+        } else {
+            if (else_idx != -1) {
+                for (int i = else_start; i <= else_end; ++i) {
+                    if (lines[i] == NULL) continue;
+                    if (strlen(lines[i]) == 0) continue;
+                    char **args = tokenize(lines[i]);
+                    if (!args) continue;
+                    if (!handle_builtin(args)) {
+                        if (strchr(lines[i], '|') || strchr(lines[i], '>') || strchr(lines[i], '<')) {
+                            execute_with_redirection_and_pipes(lines[i]);
+                        } else {
+                            execute(args);
+                        }
+                    }
+                    free_token_list(args);
+                }
             }
         }
     }
+
+    free_token_list(ifargs);
+    free(copy);
+    return 0;
 }
 
+/* shell_loop: main loop: read commands, detect if-blocks, handle builtins and normal commands */
 void shell_loop(void) {
-    char linebuf[MAX_CMDLEN];
-
     while (1) {
-        // 1) Reap any finished background children to avoid zombies
-        reap_children();
+        printf("%s", PROMPT);
+        fflush(stdout);
 
-        // 2) Prompt
-        printf("%s", PROMPT); fflush(stdout);
-        if (!fgets(linebuf, sizeof(linebuf), stdin)) {
-            // EOF (Ctrl+D)
+        char *cmdline = read_cmd(stdin);
+        if (!cmdline) {
+            /* EOF */
             printf("\n");
             break;
         }
 
-        // Remove trailing newline
-        linebuf[strcspn(linebuf, "\n")] = 0;
-        char *line = trim_whitespace(linebuf);
-        if (line[0] == '\0') continue;
+        /* trim leading spaces */
+        char *p = cmdline;
+        while (*p == ' ' || *p == '\t') p++;
 
-        // 3) Split by ';' to get chained commands
-        char *saveptr = NULL;
-        char *command = strtok_r(line, ";", &saveptr);
-        while (command != NULL) {
-            char *cmd = trim_whitespace(command);
-            if (cmd[0] != '\0') {
-                // 4) Check for background execution: trailing '&'
-                int background = 0;
-                size_t len = strlen(cmd);
-                if (len > 0 && cmd[len - 1] == '&') {
-                    background = 1;
-                    cmd[len - 1] = '\0';     // remove '&'
-                    cmd = trim_whitespace(cmd); // trim again
-                }
-
-                // 5) Launch the command (foreground or background)
-                launch_command(cmd, background);
-            }
-
-            // next command
-            command = strtok_r(NULL, ";", &saveptr);
+        if (strncmp(p, "if", 2) == 0) {
+            /* handle multi-line if block */
+            parse_and_execute_if_block(cmdline);
+            free(cmdline);
+            continue;
         }
-    } // end while
+
+        /* single-line command processing */
+        /* simple check for empty */
+        if (strlen(p) == 0) {
+            free(cmdline);
+            continue;
+        }
+
+        /* Tokenize */
+        char **args = tokenize(p);
+        if (!args) {
+            free(cmdline);
+            continue;
+        }
+
+        if (!handle_builtin(args)) {
+            /* check for advanced syntax first (pipes/redirection) */
+            if (strchr(p, '|') || strchr(p, '>') || strchr(p, '<')) {
+                execute_with_redirection_and_pipes(p);
+            } else {
+                execute(args);
+            }
+        }
+
+        free_token_list(args);
+        free(cmdline);
+    }
 }
+
