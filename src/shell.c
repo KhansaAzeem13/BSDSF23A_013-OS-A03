@@ -1,129 +1,109 @@
+cat > src/shell.c <<'EOF'
 #include "shell.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
-/* ---------- READ COMMAND ---------- */
-char* read_cmd(char* prompt, FILE* fp) {
-    printf("%s", prompt);
-    char* cmdline = (char*) malloc(sizeof(char) * MAX_LEN);
-    int c, pos = 0;
-
-    while ((c = getc(fp)) != EOF) {
-        if (c == '\n') break;
-        cmdline[pos++] = c;
+/* Simple tokenizer that returns malloc'd argv (strings point into line) */
+char **parse_input(char *line) {
+    char **args = malloc(sizeof(char*) * (MAX_ARGS));
+    if (!args) return NULL;
+    int i = 0;
+    char *tok = strtok(line, " \t\n");
+    while (tok != NULL && i < MAX_ARGS - 1) {
+        args[i++] = tok;
+        tok = strtok(NULL, " \t\n");
     }
-
-    if (c == EOF && pos == 0) {
-        free(cmdline);
-        return NULL; // Handle Ctrl+D
-    }
-
-    cmdline[pos] = '\0';
-    return cmdline;
+    args[i] = NULL;
+    return args;
 }
 
-/* ---------- TOKENIZE COMMAND ---------- */
-char** tokenize(char* cmdline) {
-    if (cmdline == NULL || cmdline[0] == '\0' || cmdline[0] == '\n') {
-        return NULL;
-    }
+/* Built-in handler: returns 1 if handled, 0 if not */
+int handle_builtin(char **args) {
+    if (!args || !args[0]) return 0;
 
-    char** arglist = (char**)malloc(sizeof(char*) * (MAXARGS + 1));
-    for (int i = 0; i < MAXARGS + 1; i++) {
-        arglist[i] = (char*)malloc(sizeof(char) * ARGLEN);
-        bzero(arglist[i], ARGLEN);
-    }
-
-    char* cp = cmdline;
-    char* start;
-    int len;
-    int argnum = 0;
-
-    while (*cp != '\0' && argnum < MAXARGS) {
-        while (*cp == ' ' || *cp == '\t') cp++; // skip spaces
-        if (*cp == '\0') break;
-        start = cp;
-        len = 1;
-        while (*++cp != '\0' && !(*cp == ' ' || *cp == '\t')) {
-            len++;
-        }
-        strncpy(arglist[argnum], start, len);
-        arglist[argnum][len] = '\0';
-        argnum++;
-    }
-
-    arglist[argnum] = NULL;
-    return arglist;
-}
-
-/* ---------- HANDLE BUILT-IN COMMANDS ---------- */
-int handle_builtin(char **args)
-{
-    if (args == NULL || args[0] == NULL)
-        return 0;
-
-    /* exit */
     if (strcmp(args[0], "exit") == 0) {
         printf("Exiting shell...\n");
         exit(0);
     }
 
-    /* cd */
     if (strcmp(args[0], "cd") == 0) {
-        if (args[1] == NULL) {
-            fprintf(stderr, "cd: missing argument\n");
+        if (!args[1]) {
+            char *home = getenv("HOME");
+            if (!home) home = "/";
+            if (chdir(home) != 0) perror("cd");
         } else {
-            if (chdir(args[1]) != 0) {
-                perror("cd");
-            }
+            if (chdir(args[1]) != 0) perror("cd");
         }
-        return 1; // handled
-    }
-
-    /* help */
-    if (strcmp(args[0], "help") == 0) {
-        printf("Built-in commands:\n");
-        printf("  cd <dir>  - change directory\n");
-        printf("  help      - show this help message\n");
-        printf("  exit      - exit the shell\n");
-        printf("External commands like ls, pwd, whoami are also supported.\n");
         return 1;
     }
 
-    return 0; // not a built-in
+    if (strcmp(args[0], "help") == 0) {
+        printf("Built-in commands:\n  cd <dir>\n  help\n  exit\n  jobs\n  fg <jobid>\n  kill <jobid>\n  history\n");
+        return 1;
+    }
+
+    if (strcmp(args[0], "history") == 0) {
+        /* history implemented elsewhere (if at all) */
+        return 1;
+    }
+
+    /* Job control builtins exist in execute.c (only declarations are here) */
+    if (strcmp(args[0], "jobs") == 0) {
+        print_jobs();
+        return 1;
+    }
+    if (strcmp(args[0], "fg") == 0) {
+        if (!args[1]) fprintf(stderr, "Usage: fg <jobid>\n");
+        else bring_fg(atoi(args[1]));
+        return 1;
+    }
+    if (strcmp(args[0], "kill") == 0) {
+        if (!args[1]) fprintf(stderr, "Usage: kill <jobid>\n");
+        else kill_job(atoi(args[1]));
+        return 1;
+    }
+
+    return 0;
 }
 
-/* ---------- MAIN SHELL LOOP ---------- */
-void shell_loop(void)
-{
-    char* cmdline;
-    char** args;
+/* Main shell loop */
+void shell_loop(void) {
+    char line[MAX_LEN];
 
     while (1) {
-        cmdline = read_cmd(PROMPT, stdin);
-        if (cmdline == NULL) {
+        printf("%s", PROMPT);
+        fflush(stdout);
+
+        if (!fgets(line, sizeof(line), stdin)) {
             printf("\n");
             break;
         }
+        line[strcspn(line, "\n")] = '\0';
+        if (line[0] == '\0') continue;
 
-        args = tokenize(cmdline);
-        if (args == NULL) {
-            free(cmdline);
+        /* if pipes or redirection present, hand the raw line to executor */
+        if (strchr(line, '|') || strchr(line, '<') || strchr(line, '>')) {
+            char *dup = strdup(line);
+            if (!dup) continue;
+            execute_with_redirection_and_pipes(dup);
+            free(dup);
             continue;
         }
 
-        /* check built-ins before executing external commands */
-        if (handle_builtin(args)) {
-            free(cmdline);
-            for (int i = 0; args[i] != NULL; i++)
-                free(args[i]);
-            free(args);
-            continue;
+        /* normal path */
+        char *dup = strdup(line);
+        if (!dup) continue;
+        char **args = parse_input(dup);
+        if (!args) { free(dup); continue; }
+
+        if (!handle_builtin(args)) {
+            execute(args);
         }
 
-        execute(args); // external command execution
-
-        free(cmdline);
-        for (int i = 0; args[i] != NULL; i++)
-            free(args[i]);
         free(args);
+        free(dup);
     }
 }
+EOF

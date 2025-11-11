@@ -1,0 +1,87 @@
+gcc -Iinclude -c src/main.c -o src/main.o
+gcc -Iinclude -c src/shell.c -o src/shell.o
+gcc -Iinclude -c src/execute.c -o src/execute.o
+src/execute.c:7:5: error: conflicting types for ‘execute’; have ‘int(char **)’
+    7 | int execute(char **args) {
+      |     ^~~~~~~
+In file included from src/execute.c:1:
+include/shell.h:43:6: note: previous declaration of ‘execute’ with type ‘void(char **)’
+   43 | void execute(char **args);
+      |      ^~~~~~~
+src/execute.c: In function ‘execute’:
+src/execute.c:26:13: error: implicit declaration of function ‘add_job’ [-Wimplicit-function-declaration]
+   26 |             add_job(pid, args[0]);
+      |             ^~~~~~~
+src/execute.c: At top level:
+src/execute.c:39:6: warning: conflicting types for ‘add_job’; have ‘void(pid_t,  const char *)’ {aka ‘void(int,  const char *)’}
+   39 | void add_job(pid_t pid, const char *cmd) {
+      |      ^~~~~~~
+src/execute.c:26:13: note: previous implicit declaration of ‘add_job’ with type ‘void(pid_t,  const char *)’ {aka ‘void(int,  const char *)’}
+   26 |             add_job(pid, args[0]);
+      |             ^~~~~~~
+src/execute.c: In function ‘add_job’:
+src/execute.c:42:28: error: ‘Job’ has no member named ‘cmd’
+   42 |     strncpy(jobs[job_count].cmd, cmd, MAX_LEN);
+      |                            ^
+src/execute.c:43:20: error: ‘Job’ has no member named ‘active’
+   43 |     jobs[job_count].active = 1;
+      |                    ^
+src/execute.c: In function ‘check_jobs’:
+src/execute.c:49:20: error: ‘Job’ has no member named ‘active’
+   49 |         if (jobs[i].active) {
+      |                    ^
+src/execute.c:52:37: error: ‘Job’ has no member named ‘active’
+   52 |             if (result != 0) jobs[i].active = 0;
+      |                                     ^
+src/execute.c: In function ‘print_jobs’:
+src/execute.c:60:20: error: ‘Job’ has no member named ‘active’
+   60 |         if (jobs[i].active)
+      |                    ^
+src/execute.c:61:81: error: ‘Job’ has no member named ‘cmd’
+   61 |             printf("[%d] PID=%d running  %s\n", jobs[i].id, jobs[i].pid, jobs[i].cmd);
+      |                                                                                 ^
+src/execute.c: At top level:
+src/execute.c:65:5: error: conflicting types for ‘bring_fg’; have ‘int(int)’
+   65 | int bring_fg(int jobid) {
+      |     ^~~~~~~~
+include/shell.h:48:6: note: previous declaration of ‘bring_fg’ with type ‘void(int)’
+   48 | void bring_fg(int jobid);
+      |      ^~~~~~~~
+src/execute.c: In function ‘bring_fg’:
+src/execute.c:66:59: error: ‘Job’ has no member named ‘active’
+   66 |     if (jobid < 1 || jobid > job_count || !jobs[jobid - 1].active) {
+      |                                                           ^
+src/execute.c:74:20: error: ‘Job’ has no member named ‘active’
+   74 |     jobs[jobid - 1].active = 0;
+      |                    ^
+src/execute.c: At top level:
+src/execute.c:78:5: error: conflicting types for ‘kill_job’; have ‘int(int)’
+   78 | int kill_job(int jobid) {
+      |     ^~~~~~~~
+include/shell.h:49:6: note: previous declaration of ‘kill_job’ with type ‘void(int)’
+   49 | void kill_job(int jobid);
+      |      ^~~~~~~~
+src/execute.c: In function ‘kill_job’:
+src/execute.c:79:59: error: ‘Job’ has no member named ‘active’
+   79 |     if (jobid < 1 || jobid > job_count || !jobs[jobid - 1].active) {
+      |                                                           ^
+src/execute.c:85:73: error: ‘Job’ has no member named ‘cmd’
+   85 |     printf("[Job %d] killed (PID=%d): %s\n", jobid, pid, jobs[jobid - 1].cmd);
+      |                                                                         ^
+src/execute.c:86:20: error: ‘Job’ has no member named ‘active’
+   86 |     jobs[jobid - 1].active = 0;
+      |                    ^
+src/execute.c: At top level:
+src/execute.c:91:5: error: conflicting types for ‘execute_with_redirection_and_pipes’; have ‘int(char *)’
+   91 | int execute_with_redirection_and_pipes(char *cmdline) {
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+include/shell.h:44:6: note: previous declaration of ‘execute_with_redirection_and_pipes’ with type ‘void(char *)’
+   44 | void execute_with_redirection_and_pipes(char *cmdline);
+      |      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/execute.c: In function ‘execute_with_redirection_and_pipes’:
+src/execute.c:99:20: error: ‘MAXARGS’ undeclared (first use in this function); did you mean ‘MAX_ARGS’?
+   99 |         char *args[MAXARGS];
+      |                    ^~~~~~~
+      |                    MAX_ARGS
+src/execute.c:99:20: note: each undeclared identifier is reported only once for each function it appears in
+make: *** [Makefile:15: src/execute.o] Error 1
